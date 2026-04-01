@@ -1,33 +1,22 @@
 #!/usr/bin/env python3
 """
-🔥 VINTED SNIPER - API Server (Production Ready)
-Déployable sur Railway, Render, Fly.io, etc.
+🔥 VINTED SNIPER - API Server v2
+Avec meilleure gestion des erreurs et anti-détection
 """
 
 import os
 import re
 import time
+import json
 import logging
 import requests
-from flask import Flask, jsonify, request
-from flask_cors import CORS
+from flask import Flask, jsonify, request, make_response
 
 # ============================================
 # CONFIGURATION
 # ============================================
 
 app = Flask(__name__)
-
-# CORS - Autoriser TOUTES les origines
-CORS(app, origins="*", allow_headers=["Content-Type", "Authorization"], methods=["GET", "POST", "OPTIONS"])
-
-# Ajouter les headers CORS manuellement aussi (double sécurité)
-@app.after_request
-def after_request(response):
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
-    return response
 
 # Logging
 logging.basicConfig(level=logging.INFO)
@@ -36,24 +25,47 @@ logger = logging.getLogger(__name__)
 # Session HTTP persistante
 session = requests.Session()
 
-# Headers pour simuler un navigateur
+# Headers réalistes pour éviter la détection
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
     "Accept-Encoding": "gzip, deflate, br",
     "Connection": "keep-alive",
-    "Sec-Ch-Ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+    "Sec-Ch-Ua": '"Chromium";v="123", "Not(A:Brand";v="24", "Google Chrome";v="123"',
     "Sec-Ch-Ua-Mobile": "?0",
     "Sec-Ch-Ua-Platform": '"Windows"',
     "Sec-Fetch-Dest": "empty",
     "Sec-Fetch-Mode": "cors",
     "Sec-Fetch-Site": "same-origin",
+    "Referer": "https://www.vinted.fr/",
+    "Origin": "https://www.vinted.fr",
 }
 
-# Cache simple
+# Cache
 _cache = {}
-_cache_ttl = 60  # 1 minute
+_cache_ttl = 120  # 2 minutes
+
+# ============================================
+# CORS - Middleware manuel
+# ============================================
+
+@app.after_request
+def add_cors_headers(response):
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+    response.headers['Access-Control-Max-Age'] = '3600'
+    return response
+
+@app.before_request
+def handle_preflight():
+    if request.method == 'OPTIONS':
+        response = make_response()
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+        return response
 
 # ============================================
 # VINTED SESSION
@@ -64,18 +76,29 @@ def init_vinted_session():
     try:
         logger.info("🔄 Initialisation session Vinted...")
         
+        # Clear previous cookies
+        session.cookies.clear()
+        
         # Requête initiale pour obtenir les cookies
         resp = session.get(
             "https://www.vinted.fr",
-            headers=HEADERS,
-            timeout=15
+            headers={
+                "User-Agent": HEADERS["User-Agent"],
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                "Accept-Language": "fr-FR,fr;q=0.9",
+            },
+            timeout=15,
+            allow_redirects=True
         )
+        
+        logger.info(f"📄 Page d'accueil: status={resp.status_code}, length={len(resp.text)}")
         
         # Extraire le CSRF token si présent
         csrf_match = re.search(r'"csrf_token":"([^"]+)"', resp.text)
         if csrf_match:
-            session.headers.update({"X-CSRF-Token": csrf_match.group(1)})
-            logger.info("✅ CSRF token récupéré")
+            csrf_token = csrf_match.group(1)
+            session.headers.update({"X-CSRF-Token": csrf_token})
+            logger.info(f"✅ CSRF token récupéré")
         
         logger.info(f"✅ Session initialisée - Cookies: {list(session.cookies.keys())}")
         return True
@@ -87,7 +110,7 @@ def init_vinted_session():
 
 def ensure_session():
     """S'assure que la session est valide"""
-    if not session.cookies:
+    if not session.cookies or len(session.cookies) < 3:
         return init_vinted_session()
     return True
 
@@ -101,12 +124,10 @@ def index():
     """Page d'accueil"""
     return jsonify({
         "name": "Vinted Sniper API",
-        "version": "1.0.0",
+        "version": "2.0.0",
         "status": "running",
         "endpoints": {
             "/api/search": "GET - Rechercher des articles",
-            "/api/item/<id>": "GET - Détails d'un article",
-            "/api/brands": "GET - Rechercher des marques",
             "/health": "GET - Status du serveur"
         }
     })
@@ -114,7 +135,7 @@ def index():
 
 @app.route('/health')
 def health():
-    """Health check pour Railway/monitoring"""
+    """Health check"""
     return jsonify({
         "status": "ok",
         "cookies": len(session.cookies),
@@ -124,20 +145,7 @@ def health():
 
 @app.route('/api/search')
 def search():
-    """
-    Recherche d'articles Vinted
-    
-    Params:
-        q: mots-clés (obligatoire)
-        price_from: prix min
-        price_to: prix max
-        catalog_ids: catégorie
-        status_ids: état
-        brand_ids: marque
-        size_ids: taille
-        order: tri (newest_first, price_low_to_high, price_high_to_low, relevance)
-        per_page: nombre de résultats (max 96)
-    """
+    """Recherche d'articles Vinted"""
     
     query = request.args.get('q', '').strip()
     if not query:
@@ -148,10 +156,11 @@ def search():
         "search_text": query,
         "order": request.args.get('order', 'newest_first'),
         "per_page": min(int(request.args.get('per_page', 48)), 96),
+        "page": 1,
     }
     
     # Paramètres optionnels
-    optional_params = ['price_from', 'price_to', 'catalog_ids', 'status_ids', 'brand_ids', 'size_ids', 'color_ids', 'material_ids']
+    optional_params = ['price_from', 'price_to', 'catalog_ids', 'status_ids', 'brand_ids', 'size_ids']
     for param in optional_params:
         value = request.args.get(param)
         if value:
@@ -169,7 +178,10 @@ def search():
     ensure_session()
     
     try:
-        logger.info(f"🔍 Recherche: {query}")
+        logger.info(f"🔍 Recherche: {query} | Params: {params}")
+        
+        # Attendre un peu pour éviter le rate limiting
+        time.sleep(0.5)
         
         resp = session.get(
             "https://www.vinted.fr/api/v2/catalog/items",
@@ -178,17 +190,36 @@ def search():
             timeout=20
         )
         
-        # Si 401, renouveler la session
-        if resp.status_code == 401:
+        logger.info(f"📡 Réponse Vinted: status={resp.status_code}, content-type={resp.headers.get('content-type', 'unknown')}")
+        
+        # Si erreur 401 ou 403, renouveler la session
+        if resp.status_code in [401, 403]:
             logger.warning("🔄 Session expirée, renouvellement...")
             session.cookies.clear()
             init_vinted_session()
+            time.sleep(1)
             resp = session.get(
                 "https://www.vinted.fr/api/v2/catalog/items",
                 params=params,
                 headers=HEADERS,
                 timeout=20
             )
+        
+        # Vérifier si la réponse est du JSON
+        content_type = resp.headers.get('content-type', '')
+        if 'application/json' not in content_type:
+            logger.error(f"❌ Réponse non-JSON: {content_type}")
+            logger.error(f"❌ Contenu (500 premiers chars): {resp.text[:500]}")
+            
+            # Vinted nous bloque probablement, réessayer avec nouvelle session
+            session.cookies.clear()
+            init_vinted_session()
+            
+            return jsonify({
+                "error": "Vinted a bloqué la requête temporairement. Réessaie dans quelques secondes.",
+                "items": [],
+                "retry": True
+            }), 503
         
         if resp.status_code != 200:
             logger.error(f"❌ Erreur Vinted: {resp.status_code}")
@@ -197,7 +228,16 @@ def search():
                 "items": []
             }), resp.status_code
         
-        data = resp.json()
+        try:
+            data = resp.json()
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ JSON invalide: {e}")
+            logger.error(f"❌ Contenu: {resp.text[:500]}")
+            return jsonify({
+                "error": "Réponse invalide de Vinted",
+                "items": []
+            }), 502
+        
         items = data.get("items", [])
         
         # Formater les résultats
@@ -240,60 +280,12 @@ def search():
         return jsonify({"error": str(e), "items": []}), 500
 
 
-@app.route('/api/item/<int:item_id>')
-def get_item(item_id):
-    """Récupère les détails d'un article"""
-    ensure_session()
-    
-    try:
-        resp = session.get(
-            f"https://www.vinted.fr/api/v2/items/{item_id}",
-            headers=HEADERS,
-            timeout=15
-        )
-        
-        if resp.status_code != 200:
-            return jsonify({"error": "Article non trouvé"}), 404
-        
-        return jsonify(resp.json())
-    
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route('/api/brands')
-def search_brands():
-    """Recherche de marques"""
-    query = request.args.get('q', '').strip()
-    if not query:
-        return jsonify({"brands": []})
-    
-    ensure_session()
-    
-    try:
-        resp = session.get(
-            "https://www.vinted.fr/api/v2/brands",
-            params={"keyword": query, "per_page": "20"},
-            headers=HEADERS,
-            timeout=10
-        )
-        
-        if resp.status_code == 200:
-            return jsonify({"brands": resp.json().get("brands", [])})
-        
-        return jsonify({"brands": []})
-    
-    except Exception as e:
-        return jsonify({"error": str(e), "brands": []}), 500
-
-
 # ============================================
 # STARTUP
 # ============================================
 
 # Initialiser la session au démarrage
-with app.app_context():
-    init_vinted_session()
+init_vinted_session()
 
 
 if __name__ == "__main__":
