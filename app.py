@@ -8,9 +8,16 @@ import os
 import re
 import time
 import json
+import gzip
 import logging
 import requests
 from flask import Flask, jsonify, request, make_response
+
+try:
+    import brotli
+    BROTLI_AVAILABLE = True
+except ImportError:
+    BROTLI_AVAILABLE = False
 
 # ============================================
 # CONFIGURATION
@@ -30,7 +37,6 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Accept-Encoding": "gzip, deflate, br",
     "Connection": "keep-alive",
     "Sec-Ch-Ua": '"Chromium";v="123", "Not(A:Brand";v="24", "Google Chrome";v="123"',
     "Sec-Ch-Ua-Mobile": "?0",
@@ -231,12 +237,39 @@ def search():
         try:
             data = resp.json()
         except json.JSONDecodeError as e:
-            logger.error(f"❌ JSON invalide: {e}")
-            logger.error(f"❌ Contenu: {resp.text[:500]}")
-            return jsonify({
-                "error": "Réponse invalide de Vinted",
-                "items": []
-            }), 502
+            # Essayer de décoder manuellement si compressé
+            logger.warning(f"⚠️ JSON decode failed, trying manual decode...")
+            logger.warning(f"Content-Encoding: {resp.headers.get('content-encoding', 'none')}")
+            
+            decoded = False
+            
+            # Essayer brotli
+            if BROTLI_AVAILABLE and not decoded:
+                try:
+                    decompressed = brotli.decompress(resp.content)
+                    data = json.loads(decompressed)
+                    logger.info("✅ Décompression brotli réussie")
+                    decoded = True
+                except:
+                    pass
+            
+            # Essayer gzip
+            if not decoded:
+                try:
+                    decompressed = gzip.decompress(resp.content)
+                    data = json.loads(decompressed)
+                    logger.info("✅ Décompression gzip réussie")
+                    decoded = True
+                except:
+                    pass
+            
+            if not decoded:
+                logger.error(f"❌ JSON invalide: {e}")
+                logger.error(f"❌ Contenu brut (100 bytes): {resp.content[:100]}")
+                return jsonify({
+                    "error": "Réponse invalide de Vinted",
+                    "items": []
+                }), 502
         
         items = data.get("items", [])
         
