@@ -18,14 +18,16 @@ from flask_cors import CORS
 
 app = Flask(__name__)
 
-# CORS - Autorise toutes les origines (pour GitHub Pages)
-CORS(app, resources={
-    r"/api/*": {
-        "origins": "*",
-        "methods": ["GET", "POST", "OPTIONS"],
-        "allow_headers": ["Content-Type"]
-    }
-})
+# CORS - Autoriser TOUTES les origines
+CORS(app, origins="*", allow_headers=["Content-Type", "Authorization"], methods=["GET", "POST", "OPTIONS"])
+
+# Ajouter les headers CORS manuellement aussi (double sécurité)
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
+    return response
 
 # Logging
 logging.basicConfig(level=logging.INFO)
